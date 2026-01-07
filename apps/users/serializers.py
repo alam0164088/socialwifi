@@ -1,8 +1,7 @@
-
 #aright_route_backend/apps/users/serializers.py
-from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from rest_framework import serializers
 
 User = get_user_model()
 
@@ -45,3 +44,23 @@ class ChangePasswordSerializer(serializers.Serializer):
     def validate_new_password(self, value):
         validate_password(value)
         return value
+
+class ChangeEmailSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+class UserDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        # expose non-sensitive user fields only
+        fields = (
+            "id",
+            "email",
+            "is_active",
+            "is_staff",
+            "date_joined",
+            "last_login",
+            # add any custom non-sensitive fields your User model has:
+            "is_touch_id_enabled",
+            "terms_agreed",
+        )
+        read_only_fields = fields

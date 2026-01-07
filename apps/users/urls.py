@@ -1,7 +1,8 @@
 from django.urls import path
 from .views import (
     CheckEmailView, RegisterView, LoginView,
-    RequestOTPView, OTPLonView, ChangePasswordView, DeleteAccountView
+    RequestOTPView, OTPLonView, ChangePasswordView, DeleteAccountView,
+    ChangeEmailView, MeView, LogoutView  # add LogoutView
 )
 
 # Note: these paths are included under the project's `config.urls` as `path('auth/', include('apps.users.urls'))`
@@ -13,5 +14,8 @@ urlpatterns = [
     path('request-otp/', RequestOTPView.as_view(), name='request_otp'),
     path('verify-otp/', OTPLonView.as_view(), name='verify_otp'),
     path('change-password/', ChangePasswordView.as_view(), name='change_password'),
-    path('delete-account/',DeleteAccountView.as_view(), name='delete_account'),
+    path('change-email/', ChangeEmailView.as_view(), name='change_email'),
+    path('delete-account/', DeleteAccountView.as_view(), name='delete_account'),
+    path('me/', MeView.as_view(), name='me'),  # new: GET /auth/me/
+    path('logout/', LogoutView.as_view(), name='logout'),
 ]
