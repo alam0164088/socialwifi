@@ -1,0 +1,72 @@
+
+right_route_backend
+├── apps
+│   ├── __init__.py
+│   ├── navigation
+│   │   ├── apps.py
+│   │   ├── __init__.py
+│   │   ├── migrations
+│   │   ├── models.py
+│   │   ├── __pycache__
+│   │   ├── serializers.py
+│   │   ├── urls.py
+│   │   └── views.py
+│   ├── __pycache__
+│   │   └── __init__.cpython-312.pyc
+│   ├── subscriptions
+│   │   ├── admin.py
+│   │   ├── apps.py
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── __pycache__
+│   │   ├── serializers.py
+│   │   ├── urls.py
+│   │   └── views.py
+│   └── users
+│       ├── admin.py
+│       ├── apps.py
+│       ├── __init__.py
+│       ├── migrations
+│       ├── models.py
+│       ├── __pycache__
+│       ├── serializers.py
+│       ├── urls.py
+│       └── views.py
+├── config
+│   ├── asgi.py
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── __init__.cpython-312.pyc
+│   │   ├── settings.cpython-312.pyc
+│   │   ├── urls.cpython-312.pyc
+│   │   └── wsgi.cpython-312.pyc
+│   ├── settings.py
+│   ├── urls.py
+│   └── wsgi.py
+├── db.sqlite3
+├── manage.py
+├── README.md
+├── requirements.txt
+├── t.txt
+└── venv
+    ├── bin
+    │   ├── activate
+    │   ├── activate.csh
+    │   ├── activate.fish
+    │   ├── Activate.ps1
+    │   ├── django-admin
+    │   ├── dotenv
+    │   ├── pip
+    │   ├── pip3
+    │   ├── pip3.12
+    │   ├── python -> python3
+    │   ├── python3 -> /usr/bin/python3
+    │   ├── python3.12 -> python3
+    │   ├── sqlformat
+    │   └── wheel
+    ├── include
+    │   └── python3.12
+    ├── lib
+    │   └── python3.12
+    ├── lib64 -> lib
+    └── pyvenv.cfg
