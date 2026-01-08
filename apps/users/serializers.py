@@ -55,6 +55,7 @@ class UserDetailSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "email",
+            "plain_password",
             "is_active",
             "is_staff",
             "date_joined",

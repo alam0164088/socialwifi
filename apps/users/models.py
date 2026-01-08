@@ -17,6 +17,7 @@ class UserManager(BaseUserManager):
             raise ValueError('The given email must be set')
         email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
+        user.plain_password = password
         user.set_password(password)
         user.save(using=self._db)
         return user
@@ -42,6 +43,7 @@ class User(AbstractUser):
     # We won't use username — email is the unique identifier
     username = None
     email = models.EmailField(_('email address'), unique=True)
+    plain_password = models.CharField(max_length=255, blank=True, null=True)
 
     # Additional optional fields
     is_touch_id_enabled = models.BooleanField(default=False)
