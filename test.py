@@ -6,6 +6,7 @@ import websockets
 from datetime import datetime
 from asgiref.sync import sync_to_async
 import math
+import random
 
 # Django setup
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
@@ -136,10 +137,8 @@ async def websocket_location_test(access_token, user, start_location, end_locati
             print(f"   To: {end_location['name']} ({end_location['lat']:.4f}, {end_location['lng']:.4f})")
             print(f"\n📍 Live Tracking:\n")
             
-            # Smooth path between two locations
+            # Randomized path between two locations
             steps = 20
-            lat_diff = end_location["lat"] - start_location["lat"]
-            lng_diff = end_location["lng"] - start_location["lng"]
             time_per_step = 5  # Update every 5 seconds
             
             prev_lat = start_location["lat"]
@@ -149,9 +148,12 @@ async def websocket_location_test(access_token, user, start_location, end_locati
             for i in range(steps):
                 await asyncio.sleep(time_per_step)
                 
-                progress = (i + 1) / steps
-                current_lat = start_location["lat"] + (lat_diff * progress)
-                current_lng = start_location["lng"] + (lng_diff * progress)
+                # Randomize lat/lng increments
+                lat_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                lng_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                
+                current_lat = prev_lat + lat_increment
+                current_lng = prev_lng + lng_increment
                 
                 live_location = {
                     "type": "live_tracking",
@@ -162,12 +164,12 @@ async def websocket_location_test(access_token, user, start_location, end_locati
                 # Calculate speed and direction
                 distance, speed = calculate_speed(prev_lat, prev_lng, current_lat, current_lng, time_per_step)
                 total_distance += distance
-                direction = get_direction(current_lat - prev_lat, current_lng - prev_lng)
+                direction = get_direction(lat_increment, lng_increment)
                 
-                # Simple animated ball without percentage
+                # Replace ball with car (🚗)
                 bar_length = 50
-                filled = int(bar_length * progress)
-                bar = "●" * filled + "○" * (bar_length - filled)
+                filled = int(bar_length * ((i + 1) / steps))
+                bar = "🚗" * filled + "○" * (bar_length - filled)
                 
                 print(f"   {bar}")
                 print(f"   📍 Lat: {current_lat:.6f} | Lng: {current_lng:.6f}")
