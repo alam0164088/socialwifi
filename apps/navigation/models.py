@@ -1,26 +1,44 @@
 from django.db import models
-from django.conf import settings
+from django.contrib.auth import get_user_model
 
+User = get_user_model()
 
 class SavedRoute(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    name = models.CharField(max_length=150)
-    origin = models.CharField(max_length=255)
-    destination = models.CharField(max_length=255)
-    waypoints = models.JSONField(blank=True, null=True)
+    """Store user's saved routes and current location."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_routes')
+    name = models.CharField(max_length=255)
+    latitude = models.FloatField(default=0.0)  # Add default
+    longitude = models.FloatField(default=0.0)  # Add default
     created_at = models.DateTimeField(auto_now_add=True)
-
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('user', 'name')
+        ordering = ['-updated_at']
+    
     def __str__(self):
-        return f"{self.name} ({self.user})"
+        return f"{self.user.email} - {self.name}"
 
 
 class OversizedLoadDetail(models.Model):
-    route = models.ForeignKey(SavedRoute, on_delete=models.CASCADE, related_name='oversized_details')
-    width = models.DecimalField(max_digits=6, decimal_places=2)
-    height = models.DecimalField(max_digits=6, decimal_places=2)
-    length = models.DecimalField(max_digits=6, decimal_places=2)
-    weight = models.DecimalField(max_digits=8, decimal_places=2)
-    special_notes = models.TextField(blank=True)
-
+    """Store oversized load details."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='oversized_loads')
+    title = models.CharField(max_length=255, default='Untitled')
+    description = models.TextField(blank=True, default='')
+    weight = models.FloatField(null=True, blank=True)  # in kg
+    dimensions = models.CharField(max_length=255, blank=True, default='')
+    latitude = models.FloatField(default=0.0)
+    longitude = models.FloatField(default=0.0)
+    status = models.CharField(max_length=50, choices=[
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ], default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
     def __str__(self):
-        return f"Oversized for {self.route}"
+        return f"{self.user.email} - {self.title}"

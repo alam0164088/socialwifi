@@ -102,8 +102,15 @@ class LoginView(APIView):
             password = serializer.validated_data['password']
             user = authenticate(request, username=email, password=password)
             if user:
-                # For JWT: client should exchange credentials at /api/token/
-                return Response({"message": "Login Successful", "user_id": user.id,"access_token": str(RefreshToken.for_user(user).access_token),"refresh_token": str(RefreshToken.for_user(user)),"mail": email})
+                # Create refresh token once and extract both tokens
+                refresh = RefreshToken.for_user(user)
+                return Response({
+                    "message": "Login Successful",
+                    "user_id": user.id,
+                    "access_token": str(refresh.access_token),
+                    "refresh_token": str(refresh),
+                    "mail": email
+                })
             return Response({"error": "Invalid Credentials"}, status=status.HTTP_401_UNAUTHORIZED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
