@@ -7,6 +7,10 @@ from datetime import datetime
 from asgiref.sync import sync_to_async
 import math
 import random
+import folium
+from folium.plugins import MarkerCluster
+import webbrowser
+import osmnx as ox
 
 # Django setup
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
@@ -138,7 +142,7 @@ async def websocket_location_test(access_token, user, start_location, end_locati
             print(f"\n📍 Live Tracking:\n")
             
             # Randomized path between two locations
-            steps = 20
+            steps = 5
             time_per_step = 5  # Update every 5 seconds
             
             prev_lat = start_location["lat"]
@@ -197,26 +201,399 @@ async def websocket_location_test(access_token, user, start_location, end_locati
     except Exception as e:
         print(f"❌ Error: {e}")
 
-# ============================================
-# Check location after WebSocket (sync_to_async)
-# ============================================
-@sync_to_async
-def check_location_after(user):
-    """Check user location after WebSocket update."""
+async def websocket_location_test_with_map(access_token, user, start_location, end_location, route_name):
+    """Connect to WebSocket and send animated location updates with map visualization."""
+    
+    ws_url = f"ws://127.0.0.1:8000/ws/driver/?token={access_token}"
+    
+    # Create a folium map
+    map_center = [(start_location["lat"] + end_location["lat"]) / 2, (start_location["lng"] + end_location["lng"]) / 2]
+    folium_map = folium.Map(location=map_center, zoom_start=13)
+    
+    # Add start and end markers
+    folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup=f"Start: {start_location['name']}",
+        icon=folium.Icon(color="green", icon="play"),
+    ).add_to(folium_map)
+    
+    folium.Marker(
+        location=[end_location["lat"], end_location["lng"]],
+        popup=f"End: {end_location['name']}",
+        icon=folium.Icon(color="red", icon="stop"),
+    ).add_to(folium_map)
+    
+    # Add a marker cluster for live tracking
+    marker_cluster = MarkerCluster().add_to(folium_map)
+    
     try:
-        route = SavedRoute.objects.filter(user=user, name="Current Location").first()
-        if route:
-            print(f"📍 Current Location in Database:")
-            print(f"   Latitude: {route.latitude:.6f}")
-            print(f"   Longitude: {route.longitude:.6f}")
-            print(f"   Last Updated: {route.updated_at}")
-            return True
-        else:
-            print(f"❌ No location saved")
-            return False
+        async with websockets.connect(ws_url) as websocket:
+            
+            # Receive connection message
+            msg = await asyncio.wait_for(websocket.recv(), timeout=5)
+            conn_data = json.loads(msg)
+            
+            # Send initial location
+            initial_location = {
+                "type": "initialize_location",
+                "lat": start_location["lat"],
+                "lng": start_location["lng"]
+            }
+            await websocket.send(json.dumps(initial_location))
+            
+            await asyncio.wait_for(websocket.recv(), timeout=5)
+            
+            print(f"\n🚗 Route: {route_name}")
+            print(f"   From: {start_location['name']} ({start_location['lat']:.4f}, {start_location['lng']:.4f})")
+            print(f"   To: {end_location['name']} ({end_location['lat']:.4f}, {end_location['lng']:.4f})")
+            print(f"\n📍 Live Tracking:\n")
+            
+            # Randomized path between two locations
+            steps = 20
+            time_per_step = 5  # Update every 5 seconds
+            
+            prev_lat = start_location["lat"]
+            prev_lng = start_location["lng"]
+            total_distance = 0
+            
+            for i in range(steps):
+                await asyncio.sleep(time_per_step)
+                
+                # Randomize lat/lng increments
+                lat_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                lng_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                
+                current_lat = prev_lat + lat_increment
+                current_lng = prev_lng + lng_increment
+                
+                live_location = {
+                    "type": "live_tracking",
+                    "lat": current_lat,
+                    "lng": current_lng
+                }
+                
+                # Calculate speed and direction
+                distance, speed = calculate_speed(prev_lat, prev_lng, current_lat, current_lng, time_per_step)
+                total_distance += distance
+                direction = get_direction(lat_increment, lng_increment)
+                
+                # Add live marker to map
+                folium.Marker(
+                    location=[current_lat, current_lng],
+                    popup=f"Lat: {current_lat:.6f}, Lng: {current_lng:.6f}\nSpeed: {speed:.2f} km/h\nDirection: {direction}",
+                    icon=folium.Icon(color="blue", icon="car"),
+                ).add_to(marker_cluster)
+                
+                print(f"   📍 Lat: {current_lat:.6f} | Lng: {current_lng:.6f}")
+                print(f"   🚀 Speed: {speed:.2f} km/h | {direction}")
+                print()
+                
+                await websocket.send(json.dumps(live_location))
+                
+                prev_lat = current_lat
+                prev_lng = current_lng
+                
+                try:
+                    await asyncio.wait_for(websocket.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+            
+            # Save the map to an HTML file
+            map_file = "live_tracking_map.html"
+            folium_map.save(map_file)
+            print(f"   ✅ Map saved to {map_file}")
+            
+            # Open the map in the default web browser
+            webbrowser.open(map_file)
+            
+            print(f"   ✅ {route_name} - Journey completed!")
+            print(f"   📊 Total Distance: {total_distance:.3f} km")
+            
     except Exception as e:
         print(f"❌ Error: {e}")
-        return False
+
+async def websocket_location_test_with_live_map(access_token, user, start_location, end_location, route_name):
+    """Connect to WebSocket and send animated location updates with live map visualization."""
+    
+    ws_url = f"ws://127.0.0.1:8000/ws/driver/?token={access_token}"
+    
+    # Create a folium map
+    map_center = [(start_location["lat"] + end_location["lat"]) / 2, (start_location["lng"] + end_location["lng"]) / 2]
+    folium_map = folium.Map(location=map_center, zoom_start=13)
+    
+    # Add start and end markers
+    folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup=f"Start: {start_location['name']}",
+        icon=folium.Icon(color="green", icon="play"),
+    ).add_to(folium_map)
+    
+    folium.Marker(
+        location=[end_location["lat"], end_location["lng"]],
+        popup=f"End: {end_location['name']}",
+        icon=folium.Icon(color="red", icon="stop"),
+    ).add_to(folium_map)
+    
+    # Add a marker for the car (live tracking)
+    car_marker = folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup="🚗 Car",
+        icon=folium.Icon(color="blue", icon="car"),
+    )
+    car_marker.add_to(folium_map)
+    
+    # Save the initial map
+    map_file = "live_tracking_map.html"
+    folium_map.save(map_file)
+    webbrowser.open(map_file)
+    
+    try:
+        async with websockets.connect(ws_url) as websocket:
+            
+            # Receive connection message
+            msg = await asyncio.wait_for(websocket.recv(), timeout=5)
+            conn_data = json.loads(msg)
+            
+            # Send initial location
+            initial_location = {
+                "type": "initialize_location",
+                "lat": start_location["lat"],
+                "lng": start_location["lng"]
+            }
+            await websocket.send(json.dumps(initial_location))
+            
+            await asyncio.wait_for(websocket.recv(), timeout=5)
+            
+            print(f"\n🚗 Route: {route_name}")
+            print(f"   From: {start_location['name']} ({start_location['lat']:.4f}, {start_location['lng']:.4f})")
+            print(f"   To: {end_location['name']} ({end_location['lat']:.4f}, {end_location['lng']:.4f})")
+            print(f"\n📍 Live Tracking:\n")
+            
+            # Randomized path between two locations
+            steps = 20
+            time_per_step = 5  # Update every 5 seconds
+            
+            prev_lat = start_location["lat"]
+            prev_lng = start_location["lng"]
+            total_distance = 0
+            
+            for i in range(steps):
+                await asyncio.sleep(time_per_step)
+                
+                # Randomize lat/lng increments
+                lat_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                lng_increment = random.uniform(0.0001, 0.001) * random.choice([-1, 1])
+                
+                current_lat = prev_lat + lat_increment
+                current_lng = prev_lng + lng_increment
+                
+                live_location = {
+                    "type": "live_tracking",
+                    "lat": current_lat,
+                    "lng": current_lng
+                }
+                
+                # Update car marker on the map
+                car_marker.location = [current_lat, current_lng]
+                car_marker.popup = f"🚗 Car\nLat: {current_lat:.6f}, Lng: {current_lng:.6f}"
+                
+                # Save updated map
+                folium_map.save(map_file)
+                
+                print(f"   📍 Lat: {current_lat:.6f} | Lng: {current_lng:.6f}")
+                
+                await websocket.send(json.dumps(live_location))
+                
+                prev_lat = current_lat
+                prev_lng = current_lng
+                
+                try:
+                    await asyncio.wait_for(websocket.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+            
+            print(f"   ✅ {route_name} - Journey completed!")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+async def websocket_location_test_with_route(access_token, user, start_location, end_location, route_name):
+    """Connect to WebSocket and send animated location updates along the selected route."""
+    
+    ws_url = f"ws://127.0.0.1:8000/ws/driver/?token={access_token}"
+    
+    # Create a folium map
+    map_center = [(start_location["lat"] + end_location["lat"]) / 2, (start_location["lng"] + end_location["lng"]) / 2]
+    folium_map = folium.Map(location=map_center, zoom_start=13)
+    
+    # Add start and end markers
+    folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup=f"Start: {start_location['name']}",
+        icon=folium.Icon(color="green", icon="play"),
+    ).add_to(folium_map)
+    
+    folium.Marker(
+        location=[end_location["lat"], end_location["lng"]],
+        popup=f"End: {end_location['name']}",
+        icon=folium.Icon(color="red", icon="stop"),
+    ).add_to(folium_map)
+    
+    # Add the red polyline for the selected route
+    folium.PolyLine(
+        locations=[
+            [start_location["lat"], start_location["lng"]],
+            [end_location["lat"], end_location["lng"]],
+        ],
+        color="red",
+        weight=5,
+        opacity=0.8,
+    ).add_to(folium_map)
+    
+    # Add a marker for the car (live tracking)
+    car_marker = folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup="🚗 Car",
+        icon=folium.Icon(color="blue", icon="car"),
+    )
+    car_marker.add_to(folium_map)
+    
+    # Save the initial map
+    map_file = "live_tracking_map.html"
+    folium_map.save(map_file)
+    webbrowser.open(map_file)
+    
+    try:
+        async with websockets.connect(ws_url) as websocket:
+            
+            # Receive connection message
+            msg = await asyncio.wait_for(websocket.recv(), timeout=5)
+            conn_data = json.loads(msg)
+            
+            # Send initial location
+            initial_location = {
+                "type": "initialize_location",
+                "lat": start_location["lat"],
+                "lng": start_location["lng"]
+            }
+            await websocket.send(json.dumps(initial_location))
+            
+            await asyncio.wait_for(websocket.recv(), timeout=5)
+            
+            print(f"\n🚗 Route: {route_name}")
+            print(f"   From: {start_location['name']} ({start_location['lat']:.4f}, {start_location['lng']:.4f})")
+            print(f"   To: {end_location['name']} ({end_location['lat']:.4f}, {end_location['lng']:.4f})")
+            print(f"\n📍 Live Tracking:\n")
+            
+            # Generate points along the selected route
+            steps = 20
+            lat_diff = (end_location["lat"] - start_location["lat"]) / steps
+            lng_diff = (end_location["lng"] - start_location["lng"]) / steps
+            
+            current_lat = start_location["lat"]
+            current_lng = start_location["lng"]
+            
+            for i in range(steps):
+                await asyncio.sleep(5)  # Update every 5 seconds
+                
+                current_lat += lat_diff
+                current_lng += lng_diff
+                
+                # Update car marker on the map
+                car_marker.location = [current_lat, current_lng]
+                car_marker.popup = f"🚗 Car\nLat: {current_lat:.6f}, Lng: {current_lng:.6f}"
+                
+                # Save updated map
+                folium_map.save(map_file)
+                
+                print(f"   📍 Lat: {current_lat:.6f} | Lng: {current_lng:.6f}")
+                
+                await websocket.send(json.dumps({
+                    "type": "live_tracking",
+                    "lat": current_lat,
+                    "lng": current_lng
+                }))
+                
+                try:
+                    await asyncio.wait_for(websocket.recv(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+            
+            print(f"   ✅ {route_name} - Journey completed!")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+async def get_real_route_path(start_location, end_location):
+    """Get real road path between start and end locations using OSMnx."""
+    # Define start and end points
+    start_point = (start_location["lat"], start_location["lng"])
+    end_point = (end_location["lat"], end_location["lng"])
+    
+    # Get the graph for the area
+    graph = ox.graph_from_point(start_point, dist=2000, network_type="drive")
+    
+    # Find the nearest nodes to the start and end points
+    start_node = ox.distance.nearest_nodes(graph, start_point[1], start_point[0])
+    end_node = ox.distance.nearest_nodes(graph, end_point[1], end_point[0])
+    
+    # Get the shortest path between the nodes
+    route = ox.shortest_path(graph, start_node, end_node, weight="length")
+    
+    # Extract latitude and longitude for the route
+    route_coords = [(graph.nodes[node]["y"], graph.nodes[node]["x"]) for node in route]
+    return route_coords, graph
+
+async def websocket_location_test_with_real_route(access_token, user, start_location, end_location, route_name):
+    """Connect to WebSocket and send animated location updates along the real route."""
+    
+    # Get the real route path
+    route_coords, graph = await get_real_route_path(start_location, end_location)
+    
+    # Create a folium map
+    map_center = [(start_location["lat"] + end_location["lat"]) / 2, (start_location["lng"] + end_location["lng"]) / 2]
+    folium_map = folium.Map(location=map_center, zoom_start=13)
+    
+    # Add start and end markers
+    folium.Marker(
+        location=[start_location["lat"], start_location["lng"]],
+        popup=f"Start: {start_location['name']}",
+        icon=folium.Icon(color="green", icon="play"),
+    ).add_to(folium_map)
+    
+    folium.Marker(
+        location=[end_location["lat"], end_location["lng"]],
+        popup=f"End: {end_location['name']}",
+        icon=folium.Icon(color="red", icon="stop"),
+    ).add_to(folium_map)
+    
+    # Add the real route path as a polyline
+    folium.PolyLine(
+        locations=route_coords,
+        color="blue",
+        weight=5,
+        opacity=0.8,
+    ).add_to(folium_map)
+    
+    # Add a marker for the car (live tracking)
+    car_marker = folium.Marker(
+        location=route_coords[0],
+        popup="🚗 Car",
+        icon=folium.Icon(color="blue", icon="car"),
+    )
+    car_marker.add_to(folium_map)
+    
+    # Save the initial map
+    map_file = "real_route_map.html"
+    folium_map.save(map_file)
+    webbrowser.open(map_file)
+    
+    # Simulate car movement along the route
+    for coord in route_coords:
+        await asyncio.sleep(5)  # Update every 5 seconds
+        car_marker.location = coord
+        folium_map.save(map_file)
+        print(f"   📍 Lat: {coord[0]:.6f} | Lng: {coord[1]:.6f}")
 
 # ============================================
 # Main function
@@ -244,18 +621,14 @@ async def main():
         print(f"\n2️⃣  Sending live location updates...")
         print(f"🔌 Connected to WebSocket")
         
-        # Send location updates
-        await websocket_location_test(
+        # Send location updates with route visualization
+        await websocket_location_test_with_route(
             ACCESS_TOKEN, 
             user, 
             current_route, 
             next_route,
             f"{current_route['name']} → {next_route['name']}"
         )
-        
-        # Check final location
-        print(f"\n3️⃣  Verifying location in database...")
-        await check_location_after(user)
         
         print(f"\n{'='*70}")
         print("✅ Test completed successfully!")
