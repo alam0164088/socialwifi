@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     CheckEmailView, RegisterView, LoginView,
     RequestOTPView, OTPLonView, ChangePasswordView, DeleteAccountView,
-    ChangeEmailView, MeView, LogoutView  # add LogoutView
+    ChangeEmailView, MeView, LogoutView, OCRProcessView  # add LogoutView
 )
 
 # Note: these paths are included under the project's `config.urls` as `path('auth/', include('apps.users.urls'))`
@@ -18,4 +18,5 @@ urlpatterns = [
     path('delete-account/', DeleteAccountView.as_view(), name='delete_account'),
     path('me/', MeView.as_view(), name='me'),  # new: GET /auth/me/
     path('logout/', LogoutView.as_view(), name='logout'),
+    path('api/process-ocr/', OCRProcessView.as_view(), name='process-ocr'),  # OCR Process API
 ]

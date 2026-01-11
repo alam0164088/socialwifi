@@ -14,6 +14,7 @@ except Exception:
     OutstandingToken = BlacklistedToken = None
 
 import random
+import requests
 
 from .serializers import (
     ChangeEmailSerializer, ChangePasswordSerializer,
@@ -497,4 +498,38 @@ class LogoutView(APIView):
             "detail": "Token blacklist not configured. To enable: add 'rest_framework_simplejwt.token_blacklist' to INSTALLED_APPS and run makemigrations/migrate. "
                       "Alternatively, send the refresh token in body as {\"refresh\": \"<token>\"} so server can blacklist it."
         }, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+class OCRProcessView(APIView):
+    """
+    API to process an image file and send it to the OCR server.
+    Requires authentication.
+    """
+    permission_classes = [IsAuthenticated]  # Authentication required
+
+    def post(self, request, *args, **kwargs):
+        # Check if an image file is provided
+        if 'file' not in request.FILES:  # Update key to 'file'
+            return Response({"error": "No image provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        uploaded_file = request.FILES['file']  # Get the uploaded image file
+        
+        # OCR server URL
+        ocr_url = "http://10.10.7.64:8000/api/ocr/extract"
+
+        try:
+            # Send the file to the OCR server
+            files = {'file': (uploaded_file.name, uploaded_file.read(), uploaded_file.content_type)}
+            response = requests.post(ocr_url, files=files)
+
+            if response.status_code == 200:
+                return Response(response.json(), status=status.HTTP_200_OK)
+            else:
+                return Response({
+                    "error": "OCR Server Error",
+                    "details": response.text
+                }, status=response.status_code)
+
+        except requests.exceptions.RequestException:
+            return Response({"error": "Failed to connect to OCR service"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
