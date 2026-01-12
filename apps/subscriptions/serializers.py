@@ -1,14 +1,22 @@
 from rest_framework import serializers
-from .models import SubscriptionPlan, UserSubscription
+from .models import Subscription, Plan
 
 
-class SubscriptionPlanSerializer(serializers.ModelSerializer):
+class PlanSerializer(serializers.ModelSerializer):
     class Meta:
-        model = SubscriptionPlan
-        fields = '__all__'
+        model = Plan
+        fields = ['id', 'name', 'price', 'currency', 'interval']
 
 
-class UserSubscriptionSerializer(serializers.ModelSerializer):
+class IAPValidateSerializer(serializers.Serializer):
+    token = serializers.CharField(required=False, allow_blank=True)
+    platform = serializers.ChoiceField(choices=['google', 'apple'], required=True)
+    product_id = serializers.CharField(required=True)
+
+
+class SubscriptionStatusSerializer(serializers.ModelSerializer):
+    plan = PlanSerializer(read_only=True)
+
     class Meta:
-        model = UserSubscription
-        fields = '__all__'
+        model = Subscription
+        fields = ['status', 'plan', 'trial_start_date', 'trial_end_date', 'renewal_date']

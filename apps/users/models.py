@@ -1,9 +1,9 @@
-
 # right_route_backend/apps/users/models.py
 
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
 
 class UserManager(BaseUserManager):
@@ -60,3 +60,46 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+
+class Subscription(models.Model):
+    STATUS_CHOICES = (
+        ('trial', 'Trial'),
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+    )
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='user_subscription')
+    plan = models.ForeignKey('subscriptions.Plan', on_delete=models.SET_NULL, null=True, blank=True, related_name='user_subscriptions')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='trial')
+    trial_start_date = models.DateTimeField(null=True, blank=True)
+    trial_end_date = models.DateTimeField(null=True, blank=True)
+    renewal_date = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def activate_trial(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        self.status = 'trial'
+        self.trial_start_date = timezone.now()
+        self.trial_end_date = timezone.now() + timedelta(days=15)
+        self.save()
+
+    def is_active_and_valid(self):
+        from django.utils import timezone
+        if self.status == 'trial' and self.trial_end_date and self.trial_end_date < timezone.now():
+            self.status = 'expired'
+            self.save()
+        elif self.status == 'active' and self.renewal_date and self.renewal_date < timezone.now():
+            self.status = 'expired'
+            self.save()
+        return self.status in ['trial', 'active']
+
+    def is_trial_active(self):
+        from django.utils import timezone
+        if self.trial_end_date and self.trial_end_date > timezone.now():
+            return True
+        return False
+
+    def __str__(self):
+        return f"{self.user.email} - {self.status}"

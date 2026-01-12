@@ -8,6 +8,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from apps.subscriptions.models import Subscription
+
 try:
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 except Exception:
@@ -106,12 +108,26 @@ class LoginView(APIView):
             if user:
                 # Create refresh token once and extract both tokens
                 refresh = RefreshToken.for_user(user)
+
+                # Check or create subscription
+                subscription, created = Subscription.objects.get_or_create(user=user)
+
+                if created:
+                    # Activate 15-day free trial for new users
+                    subscription.activate_trial()
+                elif not subscription.is_active_and_valid():
+                    # If trial expired, set subscription status to expired
+                    subscription.status = 'expired'
+                    subscription.save()
+
                 return Response({
                     "message": "Login Successful",
                     "user_id": user.id,
                     "access_token": str(refresh.access_token),
                     "refresh_token": str(refresh),
-                    "mail": email
+                    "mail": email,
+                    "subscription_status": subscription.status,
+                    "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None
                 })
             return Response({"error": "Invalid Credentials"}, status=status.HTTP_401_UNAUTHORIZED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -532,4 +548,3 @@ class OCRProcessView(APIView):
 
         except requests.exceptions.RequestException:
             return Response({"error": "Failed to connect to OCR service"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
