@@ -13,25 +13,24 @@ class RegistrationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['email', 'password', 'is_touch_id_enabled', 'terms_agreed']
-
-    def validate_password(self, value):
-        # optional: use Django password validators
-        validate_password(value)
-        return value
+        fields = ('email', 'password', 'first_name', 'last_name',
+                  'is_touch_id_enabled', 'terms_agreed')
+        extra_kwargs = {
+            'first_name': {'required': False},
+            'last_name': {'required': False},
+            'is_touch_id_enabled': {'required': False},
+            'terms_agreed': {'required': False},
+        }
 
     def create(self, validated_data):
-        user = User.objects.create_user(
-            email=validated_data['email'],
-            password=validated_data['password'],
-            is_touch_id_enabled=validated_data.get('is_touch_id_enabled', False),
-            terms_agreed=validated_data.get('terms_agreed', False)
-        )
+        password = validated_data.pop('password')
+        # create_user ensures password hashing & any custom logic
+        user = User.objects.create_user(password=password, **validated_data)
         return user
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, min_length=6)
 
 class VerifyOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()

@@ -3,12 +3,14 @@ from django.core import signing
 from django.core.mail import send_mail, EmailMessage
 from django.core.signing import BadSignature, SignatureExpired
 from django.utils import timezone
+from django.conf import settings  # ✅ এই লাইন যোগ করুন
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from apps.subscriptions.models import Subscription
+from datetime import timedelta
+from apps.subscriptions.models import Subscription, Plan
 
 try:
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
@@ -17,6 +19,7 @@ except Exception:
 
 import random
 import requests
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 
 from .serializers import (
     ChangeEmailSerializer, ChangePasswordSerializer,
@@ -32,20 +35,16 @@ EMAIL_TOKEN_MAX_AGE = 60 * 60  # 1 hour (adjust as needed)
 
 
 def resolve_email_from_request(request):
-    """Resolve email from request data or email token header/body.
-
-    Priority:
-      1. Explicit `email` in JSON body
-      2. `X-Email-Token` header
-      3. `email_token` in JSON body
-    Returns email string or None.
-    """
     data = request.data if isinstance(request.data, dict) else dict(request.data)
     email = data.get('email')
     if email:
         return email
 
-    token = request.headers.get('X-Email-Token') or data.get('email_token')
+    # check common header forms and body token
+    token = (request.headers.get('X-Email-Token')
+             or request.headers.get('x-email-token')
+             or request.META.get('HTTP_X_EMAIL_TOKEN')
+             or data.get('email_token'))
     if not token:
         return None
     try:
@@ -74,9 +73,9 @@ class CheckEmailView(APIView):
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []  # disable auth challenge for this public endpoint
 
     def post(self, request):
-        # allow email to be omitted if client provides the signed email token
         incoming = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         if not incoming.get('email'):
             resolved = resolve_email_from_request(request)
@@ -84,53 +83,76 @@ class RegisterView(APIView):
                 incoming['email'] = resolved
 
         serializer = RegistrationSerializer(data=incoming)
-        if serializer.is_valid():
-            user = serializer.save()
-            return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
 
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []  # disable auth challenge for login
 
     def post(self, request):
         incoming = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        # debug
+        print("[LOGIN] request.headers keys:", list(request.headers.keys()))
+        print("[LOGIN] incoming before resolve:", incoming)
+
         if not incoming.get('email'):
             resolved = resolve_email_from_request(request)
+            print("[LOGIN] resolved email from token:", resolved)
             if resolved:
                 incoming['email'] = resolved
 
         serializer = LoginSerializer(data=incoming)
-        if serializer.is_valid():
-            email = serializer.validated_data['email']
-            password = serializer.validated_data['password']
-            user = authenticate(request, username=email, password=password)
-            if user:
-                # Create refresh token once and extract both tokens
-                refresh = RefreshToken.for_user(user)
+        print("[LOGIN] serializer valid:", serializer.is_valid())
+        print("[LOGIN] serializer errors:", serializer.errors)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-                # Check or create subscription
-                subscription, created = Subscription.objects.get_or_create(user=user)
+        email = serializer.validated_data['email']
+        password = serializer.validated_data['password']
 
-                if created:
-                    # Activate 15-day free trial for new users
-                    subscription.activate_trial()
-                elif not subscription.is_active_and_valid():
-                    # If trial expired, set subscription status to expired
-                    subscription.status = 'expired'
-                    subscription.save()
+        # try authenticate first
+        user = authenticate(request, username=email, password=password)
+        print("[LOGIN] authenticate returned:", user)
 
-                return Response({
-                    "message": "Login Successful",
-                    "user_id": user.id,
-                    "access_token": str(refresh.access_token),
-                    "refresh_token": str(refresh),
-                    "mail": email,
-                    "subscription_status": subscription.status,
-                    "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None
-                })
-            return Response({"error": "Invalid Credentials"}, status=status.HTTP_401_UNAUTHORIZED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # fallback to manual lookup if authenticate failed
+        if user is None:
+            try:
+                user_obj = User.objects.get(email=email)
+                if user_obj.check_password(password):
+                    user = user_obj
+                    print("[LOGIN] manual password check succeeded")
+                else:
+                    print("[LOGIN] manual password check failed")
+            except User.DoesNotExist:
+                print("[LOGIN] no user with that email")
+
+        if not user:
+            return Response({"error": "Invalid email or password"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if not getattr(user, "is_active", True):
+            return Response({"error": "User account is inactive"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # tokens and subscription (unchanged)
+        refresh = RefreshToken.for_user(user)
+        subscription, created = Subscription.objects.get_or_create(user=user)
+        if created and hasattr(subscription, "activate_trial"):
+            subscription.activate_trial()
+        elif hasattr(subscription, "is_active_and_valid") and not subscription.is_active_and_valid():
+            subscription.status = 'expired'
+            subscription.save()
+
+        return Response({
+            "message": "Login Successful",
+            "user_id": user.id,
+            "access_token": str(refresh.access_token),
+            "refresh_token": str(refresh),
+            "mail": email,
+            "subscription_status": subscription.status,
+            "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None
+        })
 
 
 class RequestOTPView(APIView):
@@ -310,18 +332,36 @@ class RequestOTPView(APIView):
                 </body>
             </html>
             """
+            
+            # ✅ settings.DEFAULT_FROM_EMAIL ব্যবহার করুন (hardcoded email নয়)
             email_message = EmailMessage(
                 subject=subject,
                 body=html_message,
-                from_email='no-reply@helpmespeak.app',
+                from_email=settings.DEFAULT_FROM_EMAIL,  # ✅ এখানে পরিবর্তন করেছি
                 to=[email],
             )
-            email_message.content_subtype = "html"  # Set the email content type to HTML
-            email_message.send()
-            print(f"[OTP] Sending {otp} to {email}")
-            return Response({"message": "OTP sent to email"}, status=status.HTTP_200_OK)
+            email_message.content_subtype = "html"
+            
+            # ✅ Error handling যোগ করুন
+            try:
+                email_message.send(fail_silently=False)
+                print(f"[OTP] ✅ Successfully sent OTP {otp} to {email}")
+                return Response(
+                    {"message": "OTP sent to email", "email": email}, 
+                    status=status.HTTP_200_OK
+                )
+            except Exception as e:
+                print(f"[OTP] ❌ Failed to send OTP to {email}: {str(e)}")
+                return Response(
+                    {"error": f"Failed to send OTP: {str(e)}"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        
         except User.DoesNotExist:
-            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "User not found"}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
 
 class OTPLonView(APIView):

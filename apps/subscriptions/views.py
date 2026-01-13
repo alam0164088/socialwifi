@@ -1,9 +1,58 @@
 from rest_framework import views, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
+from datetime import timedelta
 
 from .models import Subscription, Plan
 from .serializers import IAPValidateSerializer, SubscriptionStatusSerializer
+
+
+class SubscriptionStatusView(views.APIView):
+    """
+    API to get current subscription status.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        subscription = Subscription.objects.filter(user=request.user).first()
+        
+        if not subscription:
+            return Response({
+                "status": "no_subscription",
+                "message": "No active subscription found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SubscriptionStatusSerializer(subscription)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SubscriptionCheckView(views.APIView):
+    """
+    API to check if user has active subscription.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        subscription = Subscription.objects.filter(user=request.user).first()
+        
+        if not subscription:
+            return Response({
+                "has_subscription": False,
+                "message": "No subscription found."
+            }, status=status.HTTP_200_OK)
+        
+        is_active = subscription.status == 'active'
+        is_trial_active = subscription.is_trial_active()
+        
+        return Response({
+            "has_subscription": True,
+            "is_active": is_active,
+            "is_trial_active": is_trial_active,
+            "status": subscription.status,
+            "plan": subscription.plan.name if subscription.plan else None,
+            "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
+        }, status=status.HTTP_200_OK)
 
 
 class IAPValidateView(views.APIView):
@@ -17,10 +66,10 @@ class IAPValidateView(views.APIView):
         serializer.is_valid(raise_exception=True)
 
         platform = serializer.validated_data['platform']
-        product_id = serializer.validated_data['product_id']  # ✅ product_id ব্যবহার করছি
+        product_id = serializer.validated_data['product_id']
         token = serializer.validated_data.get('token')
 
-        # ✅ product_id দিয়ে Plan খুঁজছি (google_product_id নয়)
+        # Search by product_id (works for both platforms)
         plan = Plan.objects.filter(product_id=product_id, is_active=True).first()
 
         if not plan:
@@ -29,74 +78,43 @@ class IAPValidateView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Get or create subscription for the user
+        # Get or create subscription
         subscription, created = Subscription.objects.get_or_create(user=request.user)
+        
+        # Set trial period
+        now = timezone.now()
+        trial_days = plan.trial_days or 15  # Default 15 days if not set
+        trial_end = now + timedelta(days=trial_days)
+        
         subscription.plan = plan
-        subscription.status = 'active'
+        subscription.status = 'trial'
         subscription.platform = platform
+        subscription.trial_start_date = now
+        subscription.trial_end_date = trial_end
         subscription.latest_receipt_token = token
-        subscription.renewal_date = plan.get_next_renewal_date()
+        
+        # Renewal date = trial end + subscription interval
+        if plan.interval == 'monthly':
+            subscription.renewal_date = trial_end + timedelta(days=30)
+        elif plan.interval == 'yearly':
+            subscription.renewal_date = trial_end + timedelta(days=365)
+        else:
+            subscription.renewal_date = trial_end + timedelta(days=30)
+        
         subscription.save()
 
         return Response({
             "success": True,
-            "message": "Subscription activated successfully.",
+            "message": "Subscription activated with trial period.",
             "subscription": {
                 "status": subscription.status,
                 "plan": subscription.plan.name,
                 "platform": subscription.platform,
-                "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
+                "trial_start_date": subscription.trial_start_date.isoformat(),
+                "trial_end_date": subscription.trial_end_date.isoformat(),
+                "renewal_date": subscription.renewal_date.isoformat(),
             }
         }, status=status.HTTP_200_OK)
-
-
-class SubscriptionCheckView(views.APIView):
-    """
-    API to check if user has an active subscription.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        try:
-            subscription = Subscription.objects.get(user=request.user)
-            
-            # Check if subscription is still valid
-            is_valid = subscription.is_active_and_valid()
-            
-            return Response({
-                "active": is_valid,
-                "need_subscription": not is_valid,
-                "status": subscription.status,
-                "plan": subscription.plan.name if subscription.plan else None,
-                "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
-                "message": "Your subscription is active." if is_valid else "Your subscription has expired. Please renew to continue."
-            }, status=status.HTTP_200_OK)
-        
-        except Subscription.DoesNotExist:
-            return Response({
-                "active": False,
-                "need_subscription": True,
-                "message": "You need a subscription to continue using the service."
-            }, status=status.HTTP_404_NOT_FOUND)
-
-
-class SubscriptionStatusView(views.APIView):
-    """
-    API to get subscription status and details.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        try:
-            subscription = Subscription.objects.get(user=request.user)
-            serializer = SubscriptionStatusSerializer(subscription)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        
-        except Subscription.DoesNotExist:
-            return Response(
-                {"error": "No subscription found for the user."},
-                status=status.HTTP_404_NOT_FOUND
-            )
 
 
 class PlansView(views.APIView):
@@ -105,6 +123,6 @@ class PlansView(views.APIView):
     """
     def get(self, request):
         plans = Plan.objects.filter(is_active=True).values(
-            'id', 'name', 'price', 'currency', 'interval', 'product_id'
+            'id', 'name', 'price', 'currency', 'interval', 'trial_days', 'product_id'
         )
         return Response({"plans": list(plans)}, status=status.HTTP_200_OK)
