@@ -73,7 +73,6 @@ class CheckEmailView(APIView):
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
-    authentication_classes = []  # disable auth challenge for this public endpoint
 
     def post(self, request):
         incoming = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
@@ -84,8 +83,73 @@ class RegisterView(APIView):
 
         serializer = RegistrationSerializer(data=incoming)
         serializer.is_valid(raise_exception=True)
+
+        # determine requested plan (product_id or id) if client provided
+        requested = incoming.get('plan_product_id') or incoming.get('plan_id')
+        plan = None
+        if requested:
+            plan = Plan.objects.filter(product_id=str(requested)).first() if isinstance(requested, str) else Plan.objects.filter(id=requested).first()
+
         user = serializer.save()
+
+        # ensure subscription and set trial with selected plan if any
+        subscription, created = Subscription.objects.get_or_create(user=user)
+        if created or not subscription.trial_end_date:
+            subscription.activate_trial(plan=plan)
+
         return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
+
+
+def serialize_subscription(subscription, hide_plan_on_trial=True):
+    """Return dict for subscription; hide plan when in trial if requested."""
+    plan_obj = subscription.plan
+    plan_data = None
+    if plan_obj and not (hide_plan_on_trial and subscription.status == 'trial'):
+        plan_data = {
+            "id": plan_obj.id,
+            "name": plan_obj.name,
+            "price": str(plan_obj.price),
+            "currency": plan_obj.currency,
+            "interval": plan_obj.interval,
+        }
+    return {
+        "status": subscription.status,
+        "plan": plan_data,
+        "trial_start_date": subscription.trial_start_date.isoformat() if subscription.trial_start_date else None,
+        "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None,
+        "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
+        "is_trial_active": subscription.is_trial_active() if hasattr(subscription, "is_trial_active") else False,
+    }
+
+
+def minimal_subscription_dict(subscription):
+    """Return minimal subscription info in the requested shape."""
+    status = getattr(subscription, "status", None)
+    # determine active flag
+    if status == 'active':
+        active = subscription.is_subscription_active() if hasattr(subscription, "is_subscription_active") else True
+    elif status == 'trial':
+        active = subscription.is_trial_active() if hasattr(subscription, "is_trial_active") else False
+    else:
+        active = False
+
+    # renewal_date: use trial_end_date while on trial, otherwise renewal_date
+    renewal = None
+    if status == 'trial' and subscription.trial_end_date:
+        renewal = subscription.trial_end_date
+    elif getattr(subscription, "renewal_date", None):
+        renewal = subscription.renewal_date
+
+    # plan label: "trial" while in trial, otherwise plan name or None
+    plan_label = "trial" if status == 'trial' else (subscription.plan.name if getattr(subscription, "plan", None) else None)
+
+    return {
+        "active": bool(active),
+        "need_subscription": not bool(active),
+        "status": status,
+        "plan": plan_label,
+        "renewal_date": renewal.isoformat() if renewal else None,
+    }
 
 
 class LoginView(APIView):
@@ -138,11 +202,11 @@ class LoginView(APIView):
         # tokens and subscription (unchanged)
         refresh = RefreshToken.for_user(user)
         subscription, created = Subscription.objects.get_or_create(user=user)
-        if created and hasattr(subscription, "activate_trial"):
+        if created or not subscription.trial_end_date:
             subscription.activate_trial()
-        elif hasattr(subscription, "is_active_and_valid") and not subscription.is_active_and_valid():
-            subscription.status = 'expired'
-            subscription.save()
+
+        # build minimal subscription response (plan shown as "trial" during trial)
+        subscription_data = minimal_subscription_dict(subscription)
 
         return Response({
             "message": "Login Successful",
@@ -150,8 +214,7 @@ class LoginView(APIView):
             "access_token": str(refresh.access_token),
             "refresh_token": str(refresh),
             "mail": email,
-            "subscription_status": subscription.status,
-            "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None
+            **subscription_data
         })
 
 

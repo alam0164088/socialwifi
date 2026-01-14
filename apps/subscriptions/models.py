@@ -83,3 +83,32 @@ class Subscription(models.Model):
         if self.renewal_date is None:
             return self.status == 'active'
         return self.status == 'active' and timezone.now() < self.renewal_date
+
+    def activate_trial(self, plan=None):
+        """
+        Activate a trial for this subscription.
+        If plan not provided, try to pick a 'basic' monthly Plan.
+        """
+        if plan is None:
+            try:
+                plan = Plan.objects.filter(plan_type='basic', interval='monthly', is_active=True).first()
+            except Exception:
+                plan = None
+
+        now = timezone.now()
+        self.plan = plan
+        self.status = 'trial'
+        self.trial_start_date = now
+        self.trial_end_date = now + timedelta(days=(plan.trial_days if plan else 7))
+        # set renewal_date optionally after trial ends (example: trial_end + 30 days)
+        self.renewal_date = self.trial_end_date + timedelta(days=30)
+        self.save(update_fields=['plan', 'status', 'trial_start_date', 'trial_end_date', 'renewal_date'])
+        return self
+
+    def is_active_and_valid(self):
+        """Helper used in views to check if subscription is active and not expired."""
+        if self.status == 'active':
+            return self.is_subscription_active()
+        if self.status == 'trial':
+            return self.is_trial_active()
+        return False
