@@ -10,7 +10,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from datetime import timedelta
-from apps.subscriptions.models import Subscription, Plan
+from django.apps import apps
+Subscription = apps.get_model('subscriptions', 'Subscription')
+TeamMember = apps.get_model('subscriptions', 'TeamMember')
 
 try:
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
@@ -74,7 +76,7 @@ class CheckEmailView(APIView):
 class RegisterView(APIView):
     permission_classes = [AllowAny]
 
-    def post(self, request):
+    def post(self, request, *args, **kwargs):
         incoming = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         if not incoming.get('email'):
             resolved = resolve_email_from_request(request)
@@ -83,19 +85,54 @@ class RegisterView(APIView):
 
         serializer = RegistrationSerializer(data=incoming)
         serializer.is_valid(raise_exception=True)
+        user = serializer.save()
 
-        # determine requested plan (product_id or id) if client provided
+        email = incoming.get("email", "").strip().lower()
+
+        # resolve subscription models dynamically to avoid import cycles
+        from django.apps import apps as _apps
+        Plan = _apps.get_model('subscriptions', 'Plan')
+        TeamMember = _apps.get_model('subscriptions', 'TeamMember')
+        Subscription = _apps.get_model('subscriptions', 'Subscription')
+
+        # determine requested plan if client provided, else prefer free-trial plan or any active trial plan
         requested = incoming.get('plan_product_id') or incoming.get('plan_id')
         plan = None
         if requested:
-            plan = Plan.objects.filter(product_id=str(requested)).first() if isinstance(requested, str) else Plan.objects.filter(id=requested).first()
+            if isinstance(requested, str):
+                plan = Plan.objects.filter(product_id=str(requested)).first()
+            else:
+                plan = Plan.objects.filter(id=requested).first()
 
-        user = serializer.save()
+        if not plan:
+            plan = Plan.objects.filter(is_active=True, product_id__icontains='free-trial').first() \
+                   or Plan.objects.filter(is_active=True, trial_days__isnull=False).order_by('-trial_days').first() \
+                   or Plan.objects.filter(is_active=True).first()
 
-        # ensure subscription and set trial with selected plan if any
-        subscription, created = Subscription.objects.get_or_create(user=user)
-        if created or not subscription.trial_end_date:
-            subscription.activate_trial(plan=plan)
+        # If there's a pending team invite for this email, DO NOT grant team 30-day here.
+        # signals.attach_invites_and_grant_team_subscription will handle team-granted 30d after user is created.
+        has_invite = TeamMember.objects.filter(invited_email__iexact=email, user__isnull=True).exists()
+
+        sub, created = Subscription.objects.get_or_create(user=user)
+        if not has_invite:
+            # normal trial flow (honor plan.trial_days when possible)
+            try:
+                sub.activate_trial(plan=plan)
+            except Exception:
+                # fallback: set a simple trial using plan.trial_days or 7 days
+                now = timezone.now()
+                days = getattr(plan, "trial_days", 7) or 7
+                sub.plan = plan
+                sub.status = "trial"
+                sub.trial_start_date = now
+                sub.trial_end_date = now + timedelta(days=days)
+                sub.renewal_date = sub.trial_end_date
+                sub.save(update_fields=["plan", "status", "trial_start_date", "trial_end_date", "renewal_date"])
+        else:
+            # create baseline record and let signals grant the team 30-day
+            sub.plan = plan
+            sub.status = "trial"
+            sub.save(update_fields=["plan", "status"])
 
         return Response({"message": "User registered successfully", "user_id": user.id}, status=status.HTTP_201_CREATED)
 

@@ -1,11 +1,7 @@
-# from django.urls import path, include
-# from rest_framework.routers import DefaultRouter
-# from . import views
+from django.urls import path
 
-# router = DefaultRouter()
-# router.register(r'routes', views.SavedRouteViewSet, basename='savedroute')
-# router.register(r'oversized', views.OversizedLoadViewSet, basename='oversized')
-
-# urlpatterns = [
-#     path('', include(router.urls)),
-# ]
+# সরল স্টাব — পরে এখানে প্রকৃত রুট যোগ করবেন
+urlpatterns = [
+    # উদাহরণ:
+    # path('route/', some_view, name='navigation-route'),
+]

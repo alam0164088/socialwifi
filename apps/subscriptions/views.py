@@ -1,11 +1,24 @@
 from rest_framework import views, status
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from datetime import timedelta
+from django.contrib.auth import get_user_model
+from .serializers import TeamMemberSerializer
 
-from .models import Subscription, Plan
-from .serializers import IAPValidateSerializer, SubscriptionStatusSerializer
+# serializers used by the views (add any other serializers your views reference)
+from .serializers import (
+    SubscriptionStatusSerializer,
+    IAPValidateSerializer,
+    PlansSerializer,
+)
+
+# models used by the views
+from .models import Subscription, Plan, Team, TeamMember
+
+User = get_user_model()
 
 
 class SubscriptionStatusView(views.APIView):
@@ -15,16 +28,42 @@ class SubscriptionStatusView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        subscription = Subscription.objects.filter(user=request.user).first()
-        
-        if not subscription:
+        # ensure we fetch the subscription for the authenticated user
+        try:
+            subscription = Subscription.objects.get(user=request.user)
+        except Subscription.DoesNotExist:
             return Response({
                 "status": "no_subscription",
                 "message": "No active subscription found."
             }, status=status.HTTP_404_NOT_FOUND)
+        except Subscription.MultipleObjectsReturned:
+            # fallback: pick the most recent if there are duplicates
+            subscription = Subscription.objects.filter(user=request.user).order_by('-id').first()
+            if not subscription:
+                return Response({
+                    "status": "no_subscription",
+                    "message": "No active subscription found."
+                }, status=status.HTTP_404_NOT_FOUND)
 
         serializer = SubscriptionStatusSerializer(subscription)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = serializer.data
+
+        # include subscription owner id for clarity (safe to show)
+        data['subscription_user_id'] = getattr(subscription, 'user_id', None)
+
+        # include team info if this subscription has a Team
+        team = getattr(subscription, 'team', None)
+        if team:
+            data['team'] = {
+                "id": team.id,
+                "max_seats": team.max_seats,
+                "active_members": team.current_active_members_count(),
+                "seats_available": team.seats_available(),
+            }
+        else:
+            data['team'] = None
+
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class SubscriptionCheckView(views.APIView):
@@ -80,39 +119,56 @@ class IAPValidateView(views.APIView):
 
         # Get or create subscription
         subscription, created = Subscription.objects.get_or_create(user=request.user)
-        
-        # Set trial period
+
         now = timezone.now()
-        trial_days = plan.trial_days or 15  # Default 15 days if not set
-        trial_end = now + timedelta(days=trial_days)
-        
-        subscription.plan = plan
-        subscription.status = 'trial'
-        subscription.platform = platform
-        subscription.trial_start_date = now
-        subscription.trial_end_date = trial_end
-        subscription.latest_receipt_token = token
-        
-        # Renewal date = trial end + subscription interval
+
+        # determine billing period in days
         if plan.interval == 'monthly':
-            subscription.renewal_date = trial_end + timedelta(days=30)
+            billing_days = 30
         elif plan.interval == 'yearly':
-            subscription.renewal_date = trial_end + timedelta(days=365)
+            billing_days = 365
         else:
-            subscription.renewal_date = trial_end + timedelta(days=30)
-        
+            billing_days = 30
+
+        # determine trial days correctly (don't use `or` for numeric 0)
+        trial_days = plan.trial_days if plan.trial_days is not None else 7
+
+        # If this is a team plan (or trial_days == 0) => no free trial, activate immediately
+        is_team_plan = getattr(plan, "plan_type", None) == "team" or trial_days == 0
+
+        subscription.plan = plan
+        subscription.platform = platform
+        subscription.latest_receipt_token = token
+
+        if is_team_plan:
+            # team plans: active immediately, no free trial
+            subscription.status = 'active'
+            subscription.trial_start_date = now
+            subscription.trial_end_date = None
+            subscription.renewal_date = now + timedelta(days=billing_days)
+        else:
+            # individual/free plans: grant trial then set next renewal after billing period
+            subscription.status = 'trial'
+            subscription.trial_start_date = now
+            subscription.trial_end_date = now + timedelta(days=trial_days)
+            subscription.renewal_date = subscription.trial_end_date + timedelta(days=billing_days)
+
         subscription.save()
+
+        # create team record only for team plans (so team shows up)
+        if is_team_plan:
+            Team.objects.get_or_create(subscription=subscription)
 
         return Response({
             "success": True,
-            "message": "Subscription activated with trial period.",
+            "message": "Subscription activated with trial period." if not is_team_plan else "Subscription activated.",
             "subscription": {
                 "status": subscription.status,
                 "plan": subscription.plan.name,
                 "platform": subscription.platform,
-                "trial_start_date": subscription.trial_start_date.isoformat(),
-                "trial_end_date": subscription.trial_end_date.isoformat(),
-                "renewal_date": subscription.renewal_date.isoformat(),
+                "trial_start_date": subscription.trial_start_date.isoformat() if subscription.trial_start_date else None,
+                "trial_end_date": subscription.trial_end_date.isoformat() if subscription.trial_end_date else None,
+                "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
             }
         }, status=status.HTTP_200_OK)
 
@@ -126,3 +182,167 @@ class PlansView(views.APIView):
             'id', 'name', 'price', 'currency', 'interval', 'trial_days', 'product_id'
         )
         return Response({"plans": list(plans)}, status=status.HTTP_200_OK)
+
+
+class TeamMembersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        # existing list logic (keep as-is) or simple stub:
+        team = getattr(request.user, "subscription", None)
+        if not team or not getattr(team, "team", None):
+            return Response({"members": []})
+        members = team.team.members.all().values("id", "invited_email", "status", "user_id")
+        return Response({"members": list(members)})
+
+    def post(self, request, *args, **kwargs):
+        req = request.data
+        email = req.get("email")
+        name = req.get("name")
+        no_token = bool(req.get("no_token", False))
+        # default to direct add for owner convenience
+        direct_add = bool(req.get("direct_add", True))
+
+        if not email:
+            return Response({"error": "email required"}, status=400)
+
+        # ensure owner has subscription/team
+        sub, _ = Subscription.objects.get_or_create(user=request.user)
+        team = getattr(sub, "team", None)
+        if not team:
+            team = Team.objects.create(subscription=sub)
+
+        # use invite_member (it now upserts existing invites)
+        tm = team.invite_member(email=email, invited_by=request.user, use_token=not no_token)
+
+        # If there's an existing user with this email and we're direct-adding -> give 1 month team subscription
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        try:
+            existing_user = User.objects.filter(email__iexact=email).first()
+            if existing_user:
+                now = timezone.now()
+                sub_user, _ = Subscription.objects.get_or_create(user=existing_user)
+                # set team plan if team has a subscription
+                team_plan = getattr(getattr(team, "subscription", None), "plan", None)
+                if team_plan:
+                    sub_user.plan = team_plan
+                sub_user.status = "active"
+                # try link team relation if present on Subscription
+                try:
+                    sub_user.team = team
+                except Exception:
+                    pass
+                sub_user.trial_start_date = now
+                sub_user.trial_end_date = None
+                sub_user.renewal_date = now + timedelta(days=30)
+                sub_user.save()
+                # attach user to TeamMember record
+                tm.user = existing_user
+                tm.status = "active"
+                tm.save(update_fields=["user","status"])
+        except Exception:
+            pass
+
+        serializer = TeamMemberSerializer(tm)
+        return Response(serializer.data, status=201)
+
+
+class TeamInviteAcceptView(APIView):
+    """
+    Accept invite via token OR via email+password+name (no token).
+    If token provided -> validate and attach user.
+    If email provided and user exists -> attach.
+    If email provided and user not exists -> return need_register or create user if password+name provided.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('token')
+        email = request.data.get('email')
+        password = request.data.get('password')
+        name = request.data.get('name')
+
+        # Resolve invite record
+        tm = None
+        if token:
+            try:
+                data = signing.loads(token, max_age=60*60*24*30)  # 30 days max
+            except signing.BadSignature:
+                return Response({"error":"Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+            team_id = data.get('team_id')
+            email = data.get('email')
+            tm = get_object_or_404(TeamMember, team_id=team_id, invited_email__iexact=email)
+        else:
+            if not email:
+                return Response({"error":"token or email required"}, status=status.HTTP_400_BAD_REQUEST)
+            # try find pending invite, but if none and caller supplied team_id -> create member directly
+            tm = TeamMember.objects.filter(invited_email__iexact=email, status__in=['invited', 'active']).first()
+            if not tm:
+                team_id = request.data.get('team_id')
+                if not team_id:
+                    return Response({"error":"invite not found"}, status=status.HTTP_404_NOT_FOUND)
+                # create direct active member (no checks)
+                team = get_object_or_404(Team, id=team_id)
+                tm = TeamMember.objects.create(team=team, invited_email=email, status='active')
+
+        # find or create user
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            if not password or not name:
+                # frontend should register: signal or manual flow will handle subscription
+                return Response({"need_register": True, "email": email}, status=status.HTTP_200_OK)
+            user = User.objects.create_user(email=email, password=password)
+            try:
+                # set name if available on your user model
+                user.first_name = name
+                user.save(update_fields=['first_name'])
+            except Exception:
+                pass
+
+        # enforce seat capacity
+        if tm.team.seats_available() <= 0:
+            return Response({"error":"No seats available"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tm.user = user
+        tm.status = 'active'
+        try:
+            tm.accepted_at = timezone.now()
+            tm.save(update_fields=['user', 'status', 'accepted_at'])
+        except Exception:
+            tm.save()
+
+        # ensure the user has a subscription (grant 30 days if none)
+        sub, created = Subscription.objects.get_or_create(user=user)
+        if created or sub.status != 'active':
+            now = timezone.now()
+            plan = getattr(tm.team.subscription, 'plan', None)
+            sub.plan = plan
+            sub.status = 'active'
+            # link user's subscription to the team they joined
+            try:
+                sub.team = tm.team
+            except Exception:
+                pass
+            sub.trial_start_date = now
+            sub.trial_end_date = None
+            sub.renewal_date = now + timedelta(days=30)
+            sub.save(update_fields=['plan','status','trial_start_date','trial_end_date','renewal_date'])
+
+        return Response({"success": True, "team_id": tm.team.id, "member_id": tm.id}, status=status.HTTP_200_OK)
+
+
+class TeamMemberRemoveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, member_id):
+        """Remove member (soft remove). Only subscription owner can remove (you can add admin checks)."""
+        subscription = Subscription.objects.filter(user=request.user).first()
+        if not subscription or not hasattr(subscription, 'team'):
+            return Response({"detail":"No team subscription."}, status=status.HTTP_404_NOT_FOUND)
+        team = subscription.team
+        tm = get_object_or_404(TeamMember, id=member_id, team=team)
+        tm.status = 'removed'
+        tm.user = None
+        tm.save()
+        return Response({"removed": member_id})
